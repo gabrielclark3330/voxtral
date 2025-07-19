@@ -22,6 +22,8 @@ RUN uv pip install -U "vllm[audio]" \
         --torch-backend=auto \
         --break-system-packages \
         --extra-index-url https://wheels.vllm.ai/nightly
+    
+RUN uv pip install silero-vad
 
 RUN uv pip install --upgrade --break-system-packages mistral_common\[audio\]
 

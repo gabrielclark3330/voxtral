@@ -29,32 +29,3 @@ def sync_openai():
 
 
 sync_openai()
-
-#async def stream_openai_response():
-    #data = {
-        #"language": "en",
-        #'stream': True,
-        #"model": "openai/whisper-large-v3",
-    #}
-    #url = openai_api_base + "/audio/transcriptions"
-    #print("transcription result:", end=' ')
-    #async with httpx.AsyncClient() as client:
-        #with open(str(winning_call), "rb") as f:
-            #async with client.stream('POST', url, files={'file': f},
-                                     #data=data) as response:
-                #async for line in response.aiter_lines():
-                    ## Each line is a JSON object prefixed with 'data: '
-                    #if line:
-                        #if line.startswith('data: '):
-                            #line = line[len('data: '):]
-                        ## Last chunk, stream ends
-                        #if line.strip() == '[DONE]':
-                            #break
-                        ## Parse the JSON response
-                        #chunk = json.loads(line)
-                        ## Extract and print the content
-                        #content = chunk['choices'][0].get('delta',
-                                                          #{}).get('content')
-                        #print(content, end='')
-
-#asyncio.run(stream_openai_response())
