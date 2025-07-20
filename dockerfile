@@ -5,6 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        ffmpeg \
         git \
         python3-pip \
         llvm-18-dev \
@@ -23,7 +24,7 @@ RUN uv pip install -U "vllm[audio]" \
         --break-system-packages \
         --extra-index-url https://wheels.vllm.ai/nightly
     
-RUN uv pip install silero-vad
+RUN uv pip install silero-vad matplotlib
 
 RUN uv pip install --upgrade --break-system-packages mistral_common\[audio\]
 
