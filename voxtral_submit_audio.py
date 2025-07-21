@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 from openai.types.audio import Transcription, TranscriptionSegment
 from tqdm.asyncio import tqdm_asyncio
 import subprocess as sp
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, Timeout, APIConnectionError
 import asyncio
 import random
 import torch
@@ -33,6 +33,8 @@ args = ap.parse_args()
 openai_api_key = "EMPTY"
 openai_api_base = f"http://0.0.0.0:900{args.rank%8}/v1"
 print(f"base {openai_api_base}")
+OAI_MAX_RETRIES = 8
+OAI_BASE_DELAY  = 1
 
 client = AsyncOpenAI(
     api_key=openai_api_key,
@@ -520,6 +522,7 @@ def drop_first_n(path, n):
 async def worker(path, requests):
     dst = Path("/nfsdata/gabrielc/tts-v2/data_processing") / Path(drop_first_n(path, 4)).with_suffix(".json")
     if dst.exists():
+        print(f"{dst} already exists")
         return
 
     try:
@@ -527,7 +530,17 @@ async def worker(path, requests):
         for req in requests:
             chunk_start = req.pop("start")
             chunk_end = req.pop("end")
-            response = await client.audio.transcriptions.create(**req)
+            #response = await client.audio.transcriptions.create(**req, request_timeout=90)
+            for attempt in range(OAI_MAX_RETRIES):
+                try:
+                    return await client.audio.transcriptions.create(**kwargs)
+                except (Timeout, APIConnectionError) as err:
+                    if attempt == OAI_MAX_RETRIES - 1:
+                        raise
+                    delay = OAI_BASE_DELAY * math.pow(2, attempt) + random.uniform(0, 1)
+                    logging.warning("Timeout (%s) - retrying in %.1fs", err, delay)
+                    await asyncio.sleep(delay)
+
             segment_arr.append({"text": response.text, "start":chunk_start, "end":chunk_end})
 
         await write_json(dst, segment_arr)
