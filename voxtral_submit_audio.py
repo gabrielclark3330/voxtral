@@ -6,11 +6,10 @@ from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.protocol.instruct.messages import RawAudio
 from mistral_common.audio import Audio
 import httpx
-from openai import AsyncOpenAI
 from openai.types.audio import Transcription, TranscriptionSegment
 from tqdm.asyncio import tqdm_asyncio
 import subprocess as sp
-from openai import AsyncOpenAI, Timeout, APIConnectionError
+from openai import AsyncOpenAI, APITimeoutError, APIConnectionError
 import asyncio
 import random
 import torch
@@ -21,13 +20,13 @@ import math
 from torch.utils.data import IterableDataset, get_worker_info
 from torch.utils.data import DataLoader
 
-
 OPENAI_API_KEY = "EMPTY"
 AUDIO_EXTS: Set[str] = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".m4b", ".wma"}
 
 ap = argparse.ArgumentParser()
 ap.add_argument("-r", "--rank", type=int, default=0, help="Rank index of this feeder")
 ap.add_argument("-w", "--world-size", type=int, default=1, help="Total number of feeder processes")
+ap.add_argument("--shard-seed", type=str, default=None, help="Run-specific seed for dataset sharding. If not provided, sharding is stable.")
 args = ap.parse_args()
 
 openai_api_key = "EMPTY"
@@ -50,11 +49,13 @@ PAD = 0.5
 
 FOLDERS_TO_TRANSCRIBE = [
     "/nfsdata/datasets/tts/raw/Podcasts",
-    "/nfsdata/datasets/tts/raw/Podcasts_by_language",
+    #"/nfsdata/datasets/tts/raw/Podcasts_by_language",
     "/nfsdata/datasets/tts/raw/movies",
     "/nfsdata/datasets/tts/raw/downloaded_audiobooks",
     "/nfsdata/datasets/tts/raw/otheraudiobooks",
-    "/nfsdata/datasets/tts/raw/wyndlabs/",
+    #"/nfsdata/datasets/tts/raw/wyndlabs/",
+    "/nfsdata/datasets/tts/raw/wyndlabs/min_filtered_v2",
+    "/nfsdata/datasets/tts/raw/wyndlabs/minimal_channel_contents_2_updated",
 ]
 
 def ffmpeg_read_audio_for_vad(
@@ -371,6 +372,21 @@ def _iter_audio_files(root: Path) -> Iterable[Path]:
             continue
 
 
+def drop_first_n(path, n):
+    p = Path(path)
+    parts = p.parts
+    if p.is_absolute():
+        kept = parts[1 + n:]
+        return str(Path(*kept)) if kept else ""
+    else:
+        kept = parts[n:]
+        return str(Path(*kept)) if kept else ""
+
+def get_output_path(path):
+    dst = Path("/nfsdata/gabrielc/tts-v2/data_processing") / Path(drop_first_n(path, 4)).with_suffix(".json")
+    return dst
+
+
 class VadChunkDataset(IterableDataset):
     """
     Streaming, deterministic iterable dataset producing per-file transcription
@@ -398,6 +414,7 @@ class VadChunkDataset(IterableDataset):
         language: str = "en",
         temperature: float = 0.0,
         preload_vad_model: bool = True,
+        shard_seed=None,
         hash_fn = zlib.adler32,  # Accept injectable hash for testing if desired
     ) -> None:
         super().__init__()
@@ -411,6 +428,7 @@ class VadChunkDataset(IterableDataset):
         self.rank = rank
         self.world_size = world_size
         self.hash_fn = hash_fn
+        self.shard_seed=shard_seed
 
     def _ensure_vad_model(self):
         if self.vad_model is None:
@@ -474,14 +492,19 @@ class VadChunkDataset(IterableDataset):
         total_shards = self.world_size * num_workers
         global_worker_id = self.rank * num_workers + worker_id
 
-        # Stream over each root; no pre-collected list.
         for root in self.roots:
             if not root.is_dir():
                 continue
             for path in _iter_audio_files(root):
-                # Stable hash over path string; mask to 32 bits for consistency.
-                h = self.hash_fn(path.as_posix().encode("utf-8")) & 0xFFFFFFFF
-                if h % total_shards != global_worker_id:
+                path_str = path.as_posix()
+                if self.shard_seed is not None:
+                    string_to_hash = self.shard_seed + path_str
+                else:
+                    string_to_hash = path_str
+                h = self.hash_fn(string_to_hash.encode("utf-8")) & 0xFFFFFFFF
+
+                dst = get_output_path(path)
+                if h % total_shards != global_worker_id or dst.exists():
                     continue
                 try:
                     yield self._process_file(path)
@@ -498,6 +521,7 @@ dataset = VadChunkDataset(
     model_name="mistralai/Voxtral-Mini-3B-2507",
     language="en",
     temperature=0.0,
+    shard_seed=args.shard_seed,
 )
 
 loader = DataLoader(
@@ -509,18 +533,8 @@ loader = DataLoader(
 )
 
 
-def drop_first_n(path, n):
-    p = Path(path)
-    parts = p.parts
-    if p.is_absolute():
-        kept = parts[1 + n:]
-        return str(Path(*kept)) if kept else ""
-    else:
-        kept = parts[n:]
-        return str(Path(*kept)) if kept else ""
-
 async def worker(path, requests):
-    dst = Path("/nfsdata/gabrielc/tts-v2/data_processing") / Path(drop_first_n(path, 4)).with_suffix(".json")
+    dst = get_output_path(path)
     if dst.exists():
         print(f"{dst} already exists")
         return
@@ -533,7 +547,7 @@ async def worker(path, requests):
             #response = await client.audio.transcriptions.create(**req, request_timeout=90)
             for attempt in range(OAI_MAX_RETRIES):
                 try:
-                    return await client.audio.transcriptions.create(**kwargs)
+                    response = await client.audio.transcriptions.create(**req)
                 except (Timeout, APIConnectionError) as err:
                     if attempt == OAI_MAX_RETRIES - 1:
                         raise
@@ -546,6 +560,45 @@ async def worker(path, requests):
         await write_json(dst, segment_arr)
     except Exception as e:
         print(e)
+
+async def worker(path, requests):
+    dst = get_output_path(path)
+    if dst.exists():
+        print(f"SKIPPING: {dst} already exists")
+        return
+
+    try:
+        segment_arr = []
+        for req in requests:
+            chunk_start = req.pop("start")
+            chunk_end = req.pop("end")
+
+            response = None
+
+            for attempt in range(OAI_MAX_RETRIES):
+                try:
+                    response = await client.audio.transcriptions.create(**req)
+                    break
+                except (APITimeoutError, APIConnectionError, httpx.ReadTimeout) as err:
+                    if attempt == OAI_MAX_RETRIES - 1:
+                        print(f"ERROR: Chunk for {path} failed after {OAI_MAX_RETRIES} retries. Skipping file. Error: {err}")
+                        return
+
+                    delay = OAI_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    print(f"WARNING: API error on {path}. Retrying in {delay:.1f}s...")
+                    await asyncio.sleep(delay)
+
+            if response:
+                segment_arr.append({"text": response.text, "start": chunk_start, "end": chunk_end})
+            else:
+                print(f"ERROR: Could not process a chunk for {path}. Skipping file.")
+                return 
+
+        if segment_arr:
+            await write_json(dst, segment_arr)
+
+    except Exception as e:
+        print(f"FATAL WORKER ERROR for path {path}: {type(e).__name__} - {e}")
 
 async def main():
     pending = set()
