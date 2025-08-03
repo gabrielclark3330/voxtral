@@ -10,7 +10,7 @@ num_nodes="$1"
 node_num="$2"
 local_procs=8
 # use uuidgen if you need a different mapping on the data hashes
-run_seed=61f8a877-753d-482f-bf67-83f155fc62fd
+run_seed=0003F18A1E20-E64A-4228-977C-1E468C1E
 
 [[ "$node_num" =~ ^[0-9]+$ ]] || { echo "node_num must be int"; exit 1; }
 [[ "$num_nodes" =~ ^[0-9]+$ ]] || { echo "num_nodes must be int"; exit 1; }

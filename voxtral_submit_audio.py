@@ -38,6 +38,7 @@ OAI_BASE_DELAY  = 1
 client = AsyncOpenAI(
     api_key=openai_api_key,
     base_url=openai_api_base,
+    timeout=60*20,
 )
 
 vad_model = load_silero_vad()
@@ -47,16 +48,19 @@ VAD_SR = 16_000          # 16 kHz
 MAX_CHUNK = 29.0
 PAD = 0.5
 
+
 FOLDERS_TO_TRANSCRIBE = [
-    "/nfsdata/datasets/tts/raw/Podcasts",
+    #"/nfsdata/datasets/tts/raw/Podcasts",
     #"/nfsdata/datasets/tts/raw/Podcasts_by_language",
+    "/mnt/beegfs/top300uspods",
     "/nfsdata/datasets/tts/raw/movies",
     "/nfsdata/datasets/tts/raw/downloaded_audiobooks",
     "/nfsdata/datasets/tts/raw/otheraudiobooks",
     #"/nfsdata/datasets/tts/raw/wyndlabs/",
-    "/nfsdata/datasets/tts/raw/wyndlabs/min_filtered_v2",
-    "/nfsdata/datasets/tts/raw/wyndlabs/minimal_channel_contents_2_updated",
+    #"/nfsdata/datasets/tts/raw/wyndlabs/min_filtered_v2",
+    #"/nfsdata/datasets/tts/raw/wyndlabs/minimal_channel_contents_2_updated",
 ]
+
 
 def ffmpeg_read_audio_for_vad(
     path: str,
@@ -119,7 +123,7 @@ def ffmpeg_read_audio_for_vad(
     ]
 
     try:
-        proc = sp.run(cmd, check=True, capture_output=True)
+        proc = sp.run(cmd, check=True, capture_output=True, timeout=600)
     except sp.CalledProcessError as e:
         raise RuntimeError(
             f"ffmpeg failed (exit {e.returncode}): {e.stderr.decode(errors='ignore')}"
@@ -314,7 +318,7 @@ def audio_file_to_wav16k_bytes_voxtral(
     ]
 
     try:
-        proc = sp.run(cmd, check=True, capture_output=True)
+        proc = sp.run(cmd, check=True, capture_output=True, timeout=600)
     except sp.CalledProcessError as e:
         raise RuntimeError(
             f"ffmpeg failed ({e.returncode}): {e.stderr.decode(errors='ignore')}"
@@ -337,7 +341,7 @@ async def write_json(dst, segments) -> None:
         ],
         "source": "mixtral-mini",
     }
-    print(f"writing {dst}")
+    print(f"writing{args.rank%8}: {dst}")
     dst.parent.mkdir(parents=True, exist_ok=True)
     await asyncio.to_thread(dst.write_text, json.dumps(out, ensure_ascii=False, indent=2))
 
@@ -384,6 +388,10 @@ def drop_first_n(path, n):
 
 def get_output_path(path):
     dst = Path("/nfsdata/gabrielc/tts-v2/data_processing") / Path(drop_first_n(path, 4)).with_suffix(".json")
+    return dst
+
+def get_output_path(path):
+    dst = path.with_suffix(".json")
     return dst
 
 
@@ -527,7 +535,7 @@ dataset = VadChunkDataset(
 loader = DataLoader(
     dataset,
     batch_size=None,
-    num_workers=32,
+    num_workers=64,
     pin_memory=False,
     worker_init_fn=lambda _: torch.set_num_threads(1),
 )
@@ -544,7 +552,6 @@ async def worker(path, requests):
         for req in requests:
             chunk_start = req.pop("start")
             chunk_end = req.pop("end")
-            #response = await client.audio.transcriptions.create(**req, request_timeout=90)
             for attempt in range(OAI_MAX_RETRIES):
                 try:
                     response = await client.audio.transcriptions.create(**req)
@@ -581,17 +588,17 @@ async def worker(path, requests):
                     break
                 except (APITimeoutError, APIConnectionError, httpx.ReadTimeout) as err:
                     if attempt == OAI_MAX_RETRIES - 1:
-                        print(f"ERROR: Chunk for {path} failed after {OAI_MAX_RETRIES} retries. Skipping file. Error: {err}")
+                        print(f"ERROR{args.rank%8}: Chunk for {path} failed after {OAI_MAX_RETRIES} retries. Skipping file. Error: {err}")
                         return
 
                     delay = OAI_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-                    print(f"WARNING: API error on {path}. Retrying in {delay:.1f}s...")
+                    print(f"WARNING{args.rank%8}: API error on {path}. Retrying in {delay:.1f}s...")
                     await asyncio.sleep(delay)
 
             if response:
                 segment_arr.append({"text": response.text, "start": chunk_start, "end": chunk_end})
             else:
-                print(f"ERROR: Could not process a chunk for {path}. Skipping file.")
+                print(f"ERROR{args.rank%8}: Could not process a chunk for {path}. Skipping file.")
                 return 
 
         if segment_arr:

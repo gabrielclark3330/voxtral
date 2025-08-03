@@ -2,6 +2,7 @@
 
 export HF_HOME=/mnt/beegfs/cache
 RUN_ID=$(date +%Y%m%d-%H%M%S)_$RANDOM
+rm -rf vllmlogs
 mkdir -p vllmlogs
 
 CUDA_VISIBLE_DEVICES=0 vllm serve mistralai/Voxtral-Mini-3B-2507 --tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral --enable-auto-tool-choice --port 9000  > vllmlogs/vllm_9000_${RUN_ID}.log 2>&1 &
